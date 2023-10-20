@@ -1,8 +1,8 @@
 
 
-preparing_the_data <- function(beers, reviews, breweries){
+preparing_the_data <- function(beers, reviews){
 
-beers_meta <<- beer_proc_meta(beers, breweries)
+beers_meta <<- beer_proc_meta(beers)
 beer_docs<<- beers_proc_text(beers_meta)
 
 reviews <- sample_frac(reviews, size = 0.01)
