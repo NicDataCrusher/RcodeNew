@@ -1,0 +1,251 @@
+---
+title: "pre-processing&cleansing"
+author: "Kammler Niclas"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+#Analytics
+Für den analytischen Teil brauchen wir folgende Pakete: 
+
+```{r}
+library(tidyverse)
+library(dbplyr)
+library(tm)
+library(topicmodels)
+library(splitstackshape)
+library(recommenderlab)
+library(parallel)
+library(parallelMap)
+library(tidytext)
+library(countrycode)
+
+```
+
+## Daten
+Aktuell arbeite ich noch mit mite einem Datensatz, den ich von Kaggle heruntergeladen habe. 
+Mein Ziel ist es die Infrastruktur mit diesem Datensatz aufzubauen, das Preprocessing zu testen und 
+erste Recommendations zu generieren, um dann gegebenenfalls später dynamische Daten als Input nutzen zu können. 
+
+```{r echo = FALSE, cache = FALSE}
+load("~/Niclas Kammler/Thesis/beers.Rdata")
+
+summary(beers)
+summary(reviews)
+summary(breweries)
+```
+Zunächst einmal habe ich einige Pre-Processing Steps in eine Funktion verpackt, mit der wir die Daten sowohl filtern können (um eine mindest- Anzahl von Ratings für User und Biere festzulegen), als auch eine Teilmenge aus den Gesamten Daten ziehen können. 
+
+Besonders nützlich könnte sein, dass wir in unserem Datensatz Ratings für verschiedene Ebenen haben: "smell", "taste", "feel", "overall" "score". 
+Das wird uns helfen, um später die Auswirkung verschiedener Topics auf die Wahnehmung der Konsumenten zu validieren.
+```{r}
+sampling <- function(.data, siZe = 0.01, group){
+  sampled_data <- .data %>%  
+    splitstackshape::stratified(.data, group = group, 
+                                size = siZe, 
+                                keep.rownames = FALSE) %>%
+    drop_na() 
+  
+  return(sampled_data)
+}
+```
+
+```{r error = FALSE}
+data.PreSteps <- function(min.ri = 2, min.ru = 10, text = TRUE) {
+  
+   # Filter beers first
+   beers_filtered <- beers%>%
+      filter_at(.vars = c("id", "style", "abv"), any_vars(!is.na(.))) %>%
+     mutate_if(is.character, as.factor) %>% 
+      filter(!retired)
+   
+   # Filter reviews based on beer IDs
+   reviews_filtered <- reviews %>%
+     filter(beer_id %in% beers_filtered$id)
+   
+   # Further filter reviews if the text parameter is true
+   if(text) {
+     reviews_filtered <- reviews_filtered %>%
+       filter(nchar(text) >= 5)
+   }
+   
+   reviews_filtered <- reviews_filtered %>%
+     left_join(beers_filtered[,-c(7,9,10)], by = c("beer_id" = "id")) %>%
+     mutate(continent = as.factor(countrycode(country, origin = "iso2c", destination = "continent")))
+   
+   # Generate unique ID and other operations
+   VarSeek <- reviews_filtered %>%
+     select(c(date, username, style, ))
+     group_by(username)%>%
+     arrange(username, date)%>%
+     mutate(nu.ratings = n(username))%>%
+     filter(nu.ratings >= min.ru)%>% 
+     mutate(VarSeekStyle = n_distinct(style)/nu.ratings,
+            VarSeekItem = (1+ n_distinct(name)/nu.ratings),
+            uniqueID = paste0(as.character(date), '_', beer_id, '_', username))
+   
+   Dates <- reviews_filtered %>%
+  group_by(username) %>%
+  arrange(username, date) %>%
+  mutate(
+    IPT = as.numeric(log(mean(diff(date)))),  
+    IPT_std = sd(log(diff(date)), na.rm = TRUE),  
+    Norm_IPT = if_else(is.finite(IPT_std) & IPT_std != 0, (IPT - mean(IPT, na.rm = TRUE)) / IPT_std, IPT),  
+    dropout = case_when(
+      row_number() == n() & as.numeric(log(diff(date)[n() - 1])) > IPT ~ 1,
+      TRUE ~ 0
+    ),
+    month = lubridate::month(date), # extract the month from the date
+    season = case_when(
+      month %in% c(3, 4, 5) ~ "Spring",
+      month %in% c(6, 7, 8) ~ "Summer",
+      month %in% c(9, 10, 11) ~ "Fall",
+      month %in% c(12, 1, 2) ~ "Winter",
+      TRUE ~ NA_character_)
+  )
+
+  
+  
+
+   return(list(beers_filtered = beers_filtered, reviews_filtered = reviews_filtered, Dates = Dates, VarSeek = VarSeek))
+}
+
+result <- data.PreSteps()
+
+reviews_filtered <- result$reviews_filtered
+beers_filtered <- result$beers_filtered
+
+
+
+```
+
+```{r echo = TRUE}
+ggplot(result$beers_filtered, aes(style, fill = factor(style))) + 
+  geom_bar()+
+  labs(x = "", y = "Count", title = "Count of beer Styles" )+
+  theme(axis.text.x = element_text(angle = 60, vjust = 0.5, size = 4))+
+  theme(legend.position = "bottom", legend.key.size = unit(0.2, "cm"), legend.text = element_text(size = 4))+
+  guides(fill = guide_legend(title = "Styles", label.position = "right", ncol = 7))
+
+
+
+ggplot(reviews_filtered, aes(x= abv, y = nu.ratings))+geom_point()
+
+
+
+
+ABVs <-  result$beers_filtered %>% 
+  select(name, abv, style) %>% 
+  group_by(style) %>% 
+  mutate(style_mean.abv = mean(abv, na.rm = TRUE)) %>% 
+  ungroup()
+
+ABVs <-  ABVs %>% 
+  select(name, abv, style, style_mean.abv) %>% 
+  group_by(name) %>% 
+  summarize(item_diff.abv = (abv - style_mean.abv), style_mean.abv, style) %>% 
+  ungroup()
+
+reviews_filtered <- left_join(reviews_filtered, ABVs[,1:2], by = "name")
+beers_filtered <- left_join(beers_filtered, ABVs[,1:3], by = "name")
+
+reviews_filtered <- reviews_filtered %>%
+  mutate(
+    month = lubridate::month(date), # extract the month from the date
+    season = case_when(
+      month %in% c(3, 4, 5) ~ "Spring",
+      month %in% c(6, 7, 8) ~ "Summer",
+      month %in% c(9, 10, 11) ~ "Fall",
+      month %in% c(12, 1, 2) ~ "Winter",
+      TRUE ~ NA_character_ # in case there are any missing or invalid dates
+    )
+  )
+
+
+get_mode <- function(x) {
+  tab <- table(x)
+  as.character(names(tab)[which.max(tab)])
+}
+user_profiles_meta <- reviews_filtered %>%
+  group_by(username) %>%
+  summarize(
+    user_mean = mean(overall, na.rm = TRUE),
+    user_sd =  sd(overall, na.rm = TRUE),
+    continent = get_mode(continent),
+    country = get_mode(country),
+    IPT = first(IPT), 
+    VarSeekStyle = first(VarSeekStyle),
+    VarSeekItem = first(VarSeekItem),
+    user_aff.abv = mean(item_diff.abv, na.rm = TRUE,)# or mean(item_diff.abv, na.rm = TRUE) if item_diff.abv is not constant per user
+    
+  , .groups = "drop")
+
+unique_sample <- sampling(.data = reviews_unique, group = "continent")
+
+
+
+# Then plot using reviews_unique
+plot_ly(data = user_profiles_meta, x = ~user_sd, y = ~VarSeekItem, z = ~user_aff.abv, ids = ~username, color = ~country,
+        type = "scatter3d", mode = "markers",
+        marker = list(size = 3, opacity = 0.8))
+
+
+install.packages("plotly")
+library(plotly)
+
+plot_ly(reviews_filtered, x = ~IPT, y = ~log(VarSeekItem), z = ~log(nu.ratings), type="scatter3d", mode="markers",
+        marker = list(size = 3, opacity = 0.5)) %>%
+    layout(scene = list(xaxis = list(title="IPT"),
+                        yaxis = list(title="VarSeek"),
+                        zaxis = list(title="Number of Ratings")),
+           title = "Distribution of Users across IPT, VarSeek, and nu.ratings")
+
+add_dropout_column <- function(reviews_filtered) {
+  
+  # Sort the reviews by username and date
+  reviews_filtered <- reviews_filtered %>%
+    arrange(username, date)
+  
+  # Add a new column 'dropout' and assign 0 to all rows
+  reviews_filtered$dropout <- 0
+  
+  # Get the index of the last review for each user
+  last_review_indices <- reviews_filtered %>%
+    group_by(username) %>%
+    slice_tail(n = 1) %>%
+    ungroup() %>%
+    mutate(row_idx = row_number()) %>%
+    pull(row_idx)
+  
+  # Check if the last review of each user was within the range of the user's mean IPT
+  for (i in last_review_indices) {
+    user_name <- reviews_filtered$username[i]
+    mean_IPT <- filter(IPT, username == user_name)$mean_IPT
+    time_diff <- as.numeric(difftime(reviews_filtered$date[i], reviews_filtered$date[i-1], units = "days"))
+    
+    # Assign 1 to the last review if the time difference is within the range of the user's mean IPT
+    if (time_diff <= mean_IPT) {
+      reviews_filtered$dropout[i] <- 1
+    }
+  }
+  
+  return(reviews_filtered)
+}
+
+# Apply the function to the reviews_filtered data frame
+reviews_filtered <- add_dropout_column(reviews_filtered)
+
+
+# Apply the function to the reviews_filtered data frame
+reviews_filtered <- add_dropout_column(reviews_filtered)
+}
+
+
+
+
+```
+
+
+
+
+

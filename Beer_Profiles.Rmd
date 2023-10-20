@@ -1,0 +1,286 @@
+---
+title: "Status Quo, Beer Recommender"
+author: "Kammler Niclas"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+```
+
+
+
+### Sampling and Formating for recommenderlab
+In dieser Funktion teilen wir die Daten auf, um effizienter arbeiten zu können. die Content Transformationen dauern auf dem gesamten Datensatz ca. 45min. Das Erstellen der Metatags dauert mehr als 24h. Wir werden die Objekte "realRatingMatrix" und "User-Rating-List" später brauchen, wenn wir die Recommender zusammenfügen. Unser Sample wird stratifiziert. Die Verteilung der Bierstile soll beibehalten werden. 
+
+tidytext
+
+
+## Item Profiles
+
+Um die Profile der Items zu generieren nutzen wir den zuvor erzeugeugten Dataframe "beers_filtered" und extrahieren zunächst die Textdaten und verpacken Sie in einem VCorpus objekt aus dem "tm" Paket. Anschließend schreiben wir eine Funtion um die Übrigen Columns aus dem Dataframe als Methadaten auf Dokumenten Ebene abzuspeichern. Das ist besonders wichtig, um später die Daten für die Die Vorhersagen besser filtern zu können, um Gewichte anpassen zu können und für die Feature Selection nutzbar zu machen. Nachdem wir ein Corpus Objekt erstellt haben, nutzen wir die Funktione des tm Packages um unseren rohen Text zu säubern. Wir haben bereits in vorangegangen Test versuchen einen zu entfernenden Wortschatz erarbeitet. Außerdem entfernen wir für die diskrete Analyse auch die englischen Stopwörter aus dem tm Vocab. 
+
+```{r echo = TRUE}
+getTransformations()
+```
+
+Hier brauchen wir zuerst eine Funktion, die es uns ermöglicht die Daten aus dem Dataframe in die richtige Struktur zu bringen um sie als Metadaten für unseren Textkörper verwenden zu können. 
+
+```{r}
+### Pre Processing Beers###
+beers_filtered <- rename(beers_filtered, doc_id = id, text = notes) #The Function VCorpus needs a Dataframe with at least two Columns, named c("text", "doc_id") 
+
+beer_corpus <- VCorpus(DataframeSource(beers_filtered)) 
+
+
+########
+default_stopwords <- stopwords("en")
+words_to_remove <- c("don't", "not", "can't", "cannot") # I was interested in the rank for these words, connotated with the word "recommmend" thats why i kept them
+custom_stopwords <- c("ale", "brewed", "beer", "beers", "case", "mi", "bottle", "barell", "can", 
+                      "cork", "glass", "drink", "teku", "just", "snifter", 
+                      "tulip", "oz", "0%", "liter", "drink", "drank", "ml", 
+                      "milliliter", "mils", "ounces", "friday", "saturday", 
+                      "sunday", "week", "weekend", "home", "you", "yet", "growler",
+                      "\u0085\u0085\u0085\u0085\u0085",
+                      "\u0085\u0085\u0085\u0085slow","\u0085\u0085ha",                        
+                      "\u0085\u0085i","\u0085\u0085now",
+                      "\u0085\u0085unforgivable","\u0085\u0085well",
+                      "\u0085allow","\u0085and","\u0085bloodi","\u0085bought",
+                      "\u0085cantillon\u0092","\u0085cheer","\u0085chocolate",
+                      "\u0085crisp","\u0085eh","\u0085hazi","\u0085heck",
+                      "\u0085hey","\u0085holsten\u0085follow","\u0085hop",
+                      "\u0085hops","\u0085howev","\u0092\u0085i",
+                      "\u0085i\u0092m","\u0085leav","\u0085ltsighgt",
+                      "\u0085mayb","\u0085must","\u0094\u0085now","\u0085the",
+                      "\u0085\u0094the","\u0085though","\u0085to","\u0085twice",
+                      "\u0085um\u0085root","\u0085umm","\u0085wow\u0085","   ",
+                      "    ")
+all_stopwords <- c(default_stopwords, custom_stopwords)
+all_stopwords <- all_stopwords[!all_stopwords %in% words_to_remove]
+#We remove beernames from the reviews. 
+beer_names <- beers_filtered$name
+
+
+```
+
+```{r}
+beer_corpus[["429"]][["meta"]]
+```
+
+```{r}
+beer_corpus[["429"]][["content"]]
+```
+
+Die Notizen der Brauerein zu den jeweiligen Bieren sind sehr gut und aussage Kräftig formuliert. Alle relevanten Themen weren hier angesprochen: 
+* Rezenz (Mundgefühl)
+* Geschmack 
+* Aromen 
+* Trinkbarkeit (Drinkability) 
+
+Hier wäre es auch spannend mit einem Toekizer zu arbeiten. Die einzelnen Textabschnitte repräsentieren die aufgezählten Inhalte sehr gut. 
+
+```{r}
+parallelStartSocket(cpus = detectCores()) #we need to parallelize the process. 
+beer_corpus <- tm_map(beer_corpus, 
+               removeWords,           
+               all_stopwords)
+```
+
+
+```{r}
+beer_corpus[[21]][[1]]
+```
+
+```{r}
+beer_corpus <- tm_map(beer_corpus, removePunctuation)
+```
+
+```{r}
+beer_corpus[[21]][[1]]
+```
+
+```{r}
+beer_corpus <- tm_map(beer_corpus, content_transformer(tolower))
+```
+
+```{r}
+beer_corpus[[23]][[1]]
+```
+
+```{r}
+beer_corpus <- tm_map(beer_corpus, stripWhitespace)
+```
+
+```{r}
+beer_corpus[[245]][[1]]
+```
+
+```{r}
+beer_tidy = tidy(beer_corpus)
+beer_tidy_docs <- select(beer_tidy, c("id", "text"))
+beer_tidy_docs$text <- as.character(beer_tidy_docs$text)
+beer_meta <- beeriews_filtered[,!c(1,5)]
+```
+
+
+Die Document Term Matrix (DTM) repräsentiert alle Terms die in den Dokumenten auftauchen. Die Term Dokument Matrix repräsentiert alles Terms per Dokument. 
+```{r}
+# we didn't remove numbers on purpose, because they can give us important information about the quality e.g. in time of aging
+
+BeerTM <- beer_corpus %>% #we create a Document Term Matrix, weighted with TF. We can easily change the method. 
+  DocumentTermMatrix(control = list(weighting =
+                                      weightTf,
+                                  stopwords = TRUE, removePunctuation = TRUE, removeNumbers = TRUE))
+
+rowWordsa <- apply(BeerTM, 1, sum)
+BeerTM <- BeerTM[rowWordsa > 0,] #we remove Docs with empty text
+
+BeerTM <- removeSparseTerms(BeerTM, 0.99)
+
+Beer_tfidf <- weightTfIdf(BeerTM)
+str(Beer_tfidf)
+
+```
+
+
+Für den ersten simplen Recommender werden wir LDA Modell verwenden.
+Wir versuchen eine passendere Anzahl an Topics zu finden
+
+```{r}
+library(ldatuning)
+
+result <- FindTopicsNumber(
+  BeerTM,
+  topics = seq(from = 3, to = 8, by = 1),
+  metrics = c("CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 421),
+  mc.cores = 2L,
+  verbose = TRUE)
+
+FindTopicsNumber_plot(result)
+```
+* CoaJuan: Density
+* Arun: Within-Topic Divergence
+* Devaud: Across-Topic Divergence
+
+Wir werden 4 Topics wählen
+
+```{r}
+BeerLDA <- LDA(BeerTM, 4, method = "Gibbs", control = list(seed=420))
+
+topicdocmatrix <- as.data.frame(topics(BeerLDA))
+i_topics <- as(topicdocmatrix, "realRatingMatrix")
+
+topicshares_Beers <- BeerLDA@gamma #theta
+head(topicshares)
+
+wordbytopic <- matrix(  # We create a Matrix
+  NA,                    
+  BeerTM$ncol,     # The number of colums equals the amount of docs
+  4)             
+```
+Die Topics scheinen alle relativ gleich verteilt zu sein über die Dokumente 
+```{r}
+for(t in 1:4){      
+  wordbytopic[,t] <- BeerLDA@terms[order(BeerLDA@beta[t,], decreasing = TRUE)]
+}
+
+head(wordbytopic,10)
+```
+
+```{r}
+library(tidytext) 
+
+topic_3 <- tidy(myLDA, matrix = "beta")
+
+top_terms_3 <- topic_3 %>%
+  group_by(topic) %>%
+  top_n(15,beta) %>% 
+  ungroup() %>%
+  arrange(topic,-beta)
+# plot the topic and words for easy interpretation
+plot_topic_3 <- top_terms_3 %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  scale_x_reordered()
+plot_topic_3
+```
+
+```{r}
+beer_tidy <- tidy(beer_corpus)
+beer_tidy_dtm <- tidy(BeerTM)
+beer_tidy_tfifd <- tidy(Beer_tfidf)
+str(beer_tidy)
+beer_metadata <- beer_tidy %>%
+  select(id, abv, style, country) %>%
+  mutate_if(is.character, as.factor) %>% 
+  distinct()
+```
+
+```{r}
+sparse_matrix <- as(Beer_tfidf, "sparseMatrix")
+beer_tfidf_matrix <- new("realRatingMatrix", data = sparse_matrix)
+
+beer_tfidf_matrix
+```
+
+```{r}
+
+```
+
+
+```{r}
+library(word2vec)
+docs <- beer_tidy$text
+w2v_model <- word2vec(docs, type = "skip-gram", dim = 4, hs=TRUE)
+beer_embeddings <- as.matrix(w2v_model)
+beer_embeddings <- beer_embeddings[order(rownames(beer_embeddings)),] #sort by rownames
+head(beer_embeddings) # check
+
+beer_beer_embeddings <- beer_embeddings[-1,] #remove first row "</s>"
+
+str(beer_embeddings)
+labels(beer_embeddings)
+
+sort(cor(t(beer_embeddings))[,"hops"],decreasing = TRUE)[1:4] #correlation 
+
+#another way:
+predict(w2v_model,c("hops"),type="nearest",top_n=20)
+predict(w2v_model,c("poles"),type="nearest",top_n=20)
+predict(w2v_model,c("delivery"),type="nearest",top_n=20)
+predict(w2v_model,c("camping"),type="nearest",top_n=20)
+predict(w2v_model,c("tent"),type="nearest",top_n=20)
+
+
+
+#vector calculations
+example <- beer_embeddings["pole",]+beer_embeddings["broke",]
+predict(w2v_model,example,type="nearest",top_n=20)
+
+example2 <- beer_embeddings["porch",]+beer_embeddings["clean",] 
+predict(w2v_model,example2,type="nearest",top_n=20)
+```
+transfer_metadata <- function(x, i, tag){ #here we had to find a little work around in order to use other Columns as meta data in our VCorpus object. 
+  return(meta(x[i], tag = tag)[[tag]])
+}
+tags <- colnames(beers_filtered)
+tags <- tags[! tags %in% c('doc_id', 'text')]
+
+for(i in 1:length(beer_corpus)){ #here we set the Metadata on Document level for the VCorpus object.
+  for (tag in tags){ #this will take a while to run
+    meta(beer_corpus[[i]], tag=tag) <- transfer_metadata(beer_corpus, i=i, tag=tag)
+  }
+}
+
+Von diesem Punkt an werde ich verschiedene Verfahren zur Text Klassifikation ausprobieren. 
+Wir können Beispielsweise die Term der einzelnen ratings eingrenzen. Außerdem werden wir auch mit Word beer_embeddings arbeiten. 
+

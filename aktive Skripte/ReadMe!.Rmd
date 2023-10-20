@@ -1,0 +1,230 @@
+---
+title: "Read Me!"
+author: "Kammler Niclas"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Readme Document for Master Thesis 
+
+This document is an equivalent to the readme document from github. Here, I will explain the Naming of the Variables, define the packages that have to be loaded and explain the data processing precedure used to create a language based recommender system for a craftbeer online shop. 
+
+# Abreveations: 
+* Biertraum: Bt
+* RateBeer: Rb 
+* Bierothek:Bk
+* Untappt: Ut
+* User: U
+* Rating: R
+* Item: I 
+* Comments: C
+* Reviews: Rev
+* Matrix: m 
+* Data Frame: df
+
+# Naming
+ * **Datasets, dataframes and tables** must be named after the following patter: Origin_Content  E.g. "Bt_Survey"; "Rb_U_R"; "Ut_U_I_Rev"
+ * Names always indicate the used Columns (except for indizes)
+ * temporarily used data must be named: content.type_temp E.g. "residual.plot_temp"
+ * arrays must be named: 
+ * Variables must be named: type_var E.g. iterations_var
+ 
+ After executing the Functions data.PreStep and Visulisation you will receive the following result: 
+ 
+ 
+ 
+ To be able to run the code, make sure to load the following functions: 
+```{r error=FALSE}
+###########
+set.seed(420)
+
+
+sampling <- function(.data, siZe){
+  sampled_data <- .data %>% 
+    splitstackshape::stratified(.data, group = style,  
+                                size = siZe, 
+                                keep.rowids = FALSE) %>%
+    drop_na() 
+  return(sampled_data)}
+
+beer_proc_meta <- function(beers){ #this function prepares the beer documents
+  beers <<- beers %>% rename(beer_id = id)
+ 
+  beers_meta <- beers%>%
+    dplyr::select(-notes) %>% 
+    filter_at(.vars = c("beer_id", "style", "abv"), any_vars(!is.na(.))) %>% #removeobservations with missing values
+    mutate_if(is.character, as.factor) %>% #convert characters to factors
+    filter(!retired)  %>% 
+    group_by(style) %>% 
+    mutate(style_mean.abv = mean(abv, na.rm = TRUE)) %>%  
+    ungroup()%>% 
+    group_by(beer_id) %>% 
+    mutate(item_diff.abv = (abv - style_mean.abv)) %>% #calculates the difference of ABV in beer to style-mean
+    ungroup() 
+  return(beers_meta)
+} 
+
+beers_proc_text <-function(beers){ 
+  beer_docs <- beers%>% 
+    rename(beer_id = id) %>% 
+    dplyr::select(beer_id, notes) %>% 
+    mutate(description = ifelse(notes != "No notes at this time.", TRUE, FALSE))
+  
+  return(beer_docs)
+  }
+
+FUN_cut_reviews <- function(reviews, beers_filtered) {
+  cut_reviews <- reviews %>% 
+    mutate(user = paste("u", as.numeric(factor(reviews$username)), sep = "")) %>%
+    dplyr::filter(!is.na(overall)) %>% 
+    dplyr::filter(beer_id %in% beers_meta$beer_id) %>% #we make sure to only retain ratings for beers, contained in the beers_meta set
+      mutate(doc_id = paste0(date, '_', beer_id, '_', user)) 
+    
+  return(cut_reviews)}
+
+FUN_reviews_meta <- function(cut_reviews){
+  reviews_meta <- cut_reviews %>% 
+    dplyr::select(-c(text, overall, look, smell, taste, feel)) %>% 
+    arrange(user, date) %>%
+    group_by(user) %>%
+    mutate(month = lubridate::month(date),
+           IPT = as.numeric(difftime(date, lag(date), units = "days")),
+           mean_IPT = mean(IPT, na.rm = TRUE),
+           IPT = ifelse(row_number() == 1, mean_IPT, IPT),
+           season = case_when(
+             month %in% c(3, 4, 5) ~ "Spring",
+             month %in% c(6, 7, 8) ~ "Summer",
+             month %in% c(9, 10, 11) ~ "Fall",
+             month %in% c(12, 1, 2) ~ "Winter",
+             TRUE ~ NA_character_)) %>%
+    ungroup()%>%
+    left_join(beers_meta[, -c( 7, 9, 10, 11)], by = "beer_id") 
+  reviews_meta$season <- as.factor(reviews_meta$season)
+  reviews_meta <- reviews_meta[,-c(2, 6)]
+  reviews_meta$doc_id = cut_reviews$doc_id
+  return(reviews_meta)
+  }
+
+
+rating_data_processing <- function(cut_reviews, target) {
+  rating_data <- cut_reviews %>%
+    dplyr::select(user, beer_id, !!sym(target)) %>% as.data.frame()  # Use !!sym(target) to evaluate the target variable
+  
+  U_I_R <- as(rating_data, "realRatingMatrix")
+  
+  return(U_I_R)
+}
+
+
+ 
+
+rev_text_data_processing <- function(cut_reviews) {
+  rev_text <- cut_reviews %>%
+   dplyr::select(doc_id, user, text) %>% 
+    group_by(user) %>% 
+    mutate(word_count = str_count(text, "\\S+")) %>% 
+    ungroup()
+  return(rev_text)
+
+}
+
+user_processing <- function(reviews_meta, rating_data, rev_text_data) { 
+  # Combine the datasets to get a comprehensive dataset similar to reviews_filtered
+  reviews_temp <- reviews_meta %>% dplyr::select(c(1,4,6,17,18)) %>%
+    left_join(rev_text[,c("doc_id", "word_count")], by = "doc_id") %>% left_join(beers_meta[,c("beer_id", "style")], by = "beer_id")
+  
+  user_profiles <- reviews_temp %>%
+    group_by(user) %>%
+    summarise(
+      nu.ratings = n(),
+      VarSeekStyle = (n_distinct(style)),
+      IPT_mean = mean(IPT, na.rm = TRUE),
+      aff.abv = mean(item_diff.abv, na.rm = TRUE),
+      mean_word_count = mean(word_count, na.rm = TRUE)
+    )
+  
+  # Remove bots and users with fewer than 5 ratings
+ 
+  
+  
+  return(user_profiles)
+}
+
+```
+Furthermore, we have to set some methods:
+```{r}
+
+setAs("data.frame", "realRatingMatrix", function(from) {
+  user	<- from[, 1]
+  item	<- from[, 2]
+  if (ncol(from) >= 3)
+    rating <- as.numeric(from[, 3])
+  else
+    rating <- rep(1, length(item))
+  
+  i <- factor(user)
+  j <- factor(item)
+  
+  dgT <-
+    new(
+      "dgTMatrix",
+      i = as.integer(i) - 1L,
+      j = as.integer(j) - 1L,
+      x = rating,
+      Dim = c(length(levels(i)), length(levels(j))),
+      Dimnames = list(levels(i), levels(j))
+    )
+  
+  as(dgT, "realRatingMatrix")
+})
+
+
+setAs("realRatingMatrix", "data.frame", function(from) {
+  trip <- as(from, "dgTMatrix")
+  data.frame(user = rownames(from)[trip@i + 1L],
+             item = colnames(from)[trip@j + 1L],
+             rating = trip@x)[order(trip@i),]
+})
+
+setMethod("getList", signature(from = "realRatingMatrix"),
+          function(from,
+                   decode = TRUE,
+                   ratings = TRUE,
+                   ...) {
+            trip <- as(from, "dgTMatrix")
+            
+            lst <- split(trip@j , trip@i)
+                                            
+            
+            if (decode)
+              lst <- lapply(lst, function(y)
+                colnames(from)[y])
+            
+            else
+              names(lst) <- NULL
+            
+            if (!ratings)
+              return(lst)
+            
+            rts <- split(trip@x, f = trip@i)
+            
+              
+            
+                                        
+            for (i in 1:length(rts)) {
+              names(rts[[i]]) <- lst[[i]]
+              
+                }
+            
+            rts
+          })
+
+```
+
+
+ 
+ 

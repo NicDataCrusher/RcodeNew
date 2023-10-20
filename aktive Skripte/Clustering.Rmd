@@ -1,0 +1,16 @@
+---
+title: "Clustering"
+author: "Kammler Niclas"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this file we will cluster our users according to their proir patterns. We will use the dimensions nu.ratings (number of ratings per user), IPT and Variety Seeking. 
+The Idea is, to Cluster the users per Continent(we assume that the majority of consumed beers origin from the drinkers home continent). 
+Variety Seeking is a measure that represents the number of unique different styles divided by the total number of rated beers. 
+
+install.packages("mlr3cluster")

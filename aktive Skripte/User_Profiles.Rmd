@@ -1,0 +1,233 @@
+---
+title: "FeatureEngineering"
+author: "Kammler Niclas"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Feature Engineering
+
+We use this Document to comment the process of engineering features for predictions for our Ratings. 
+We will use available data of the beers, like abv, % Alk. The color and the Style. We can run Multilable LogReg or XGBoost for this data. We will also use the text data we've previously generated, cleansed and structured. We will use Word2Vec, TF-IDTF, Topic Models as Preprocessing. All the relevant information about the beers are stored as meta data in the text Corpi. Finally I woulod like to apply SVD across all Data. The next Document will be about the hybritizing of the recommenders. 
+
+### Steps
+ 
+1. We check out how to work with our Metadata properly. 
+2. We Filter out good Ratings and Bad Ratings and create new datasets.
+3. We need to aggregate the user profiles and the beer profiles. 
+3.1. We weigh text data by recency. (Long Short-Term Memory)
+3. We look for ways to implement Classification Algorithms.
+4. We apply different Methods of NLP.
+4.1. TF-IDTF
+4.2. Word2Vec
+5. We look for ways to use them for Recommendations.
+6. We find ways to evaluate Recommendations.
+7. We nurture the beer profiles with valuable reviews (We could look for users with many reviews and add their text descriptions to the beer profiles).
+
+
+## User Profiles
+
+```{r error = FALSE}
+
+
+makeU_I_rm <-function(cluster){
+ revs <- reviews_filtered %>% filter(KMCluster = cluster)
+   dplyr::select("username", "beer_id", "overall") 
+ revs <- as.data.frame(revs)
+ U_I_rm <- as(revs, "realRatingMatrix")
+ return(paste0("U_I_rm",cluster))
+ }
+ #-------------------------------------------------------------------------------
+U_I_rm_2 <- makeU_I_rm()
+U_I_Zsc <- normalize(U_I_rm, method = "Z-score")
+
+U_I_list <- getList(U_I_Zsc, decode = TRUE, ratings = TRUE)
+
+
+sim_mat <- similarity(U_I_Zsc, method = "Pearson")
+
+```
+
+
+
+Dann schauen wir us an, wie unser neuer, gefilteter Datensatz aussieht: 
+```{r}
+head(colCounts(U_I_rm))
+summary(colCounts(U_I_rm))
+hist(colCounts(U_I_rm), breaks = 100)
+
+head(rowCounts(U_I_rm))
+
+hist(rowCounts(re), breaks = 50)
+
+```
+
+Für die User Profiles müssen wir ebenfalls zunächst unsere Daten aufbereiten. Wir erstellen ein VCorpus Object, welches anschließend mit den Metadaten versehen wird, welche uns vorliegen.
+
+```{r error = FALSE}
+reviews_filtered <- rename(reviews_filtered, doc_id = username)
+rev_corpus <-VCorpus(DataframeSource(reviews_filtered))
+
+parallelStartSocket(cpus = detectCores()) #we need to parallelize the process. 
+rev_corpus <- tm_map(rev_corpus, 
+               removeWords,           
+               stopwords("en"))
+```
+
+
+```{r}
+rev_corpus[[21]][[1]]
+```
+
+```{r}
+rev_corpus <- tm_map(rev_corpus, removePunctuation)
+```
+
+```{r}
+rev_corpus[[234]][[1]]
+```
+
+```{r}
+rev_corpus <- tm_map(rev_corpus, content_transformer(tolower))
+```
+
+```{r}
+rev_corpus[[2331]][[1]]
+```
+
+```{r}
+rev_corpus <- tm_map(rev_corpus, stripWhitespace)
+```
+
+```{r}
+rev_corpus[[21]][[1]]
+```
+
+```{r}
+rev_corpus <- tm_map(rev_corpus, removeNumbers)
+```
+
+
+```{r}
+rev_tidy = tidy(rev_corpus)
+rev_tidy_docs <- select(rev_tidy, c("id", "text"))
+rev_tidy_docs$text <- as.character(rev_tidy_docs$text)
+rev_meta <- reviews_filtered[,!c(1,5)]
+```
+
+```{r}
+tidy_revs <- rev_tidy_docs %>%
+  unnest_tokens(word, text)
+all_stopwords <- data.frame(word = all_stopwords)
+tidy_revs <- anti_join(tidy_revs, all_stopwords)
+```
+
+
+Die Document Term Matrix (DTM) repräsentiert alle Terms die in den Dokumenten auftauchen. Die Term Dokument Matrix repräsentiert alles Terms per Dokument. 
+```{r}
+# we didn't remove numbers on purpose, because they can give us important information about the quality e.g. in time of aging
+parallelStartSocket(cpus = detectCores())
+RevsTM <- rev_corpus %>%  
+  DocumentTermMatrix(control = list(weighting =
+                                      weightTf))
+RevsTM <- removeSparseTerms(RevsTM, 0.99)
+
+
+rowWordsb <- apply(RevsTM, 1, sum)
+
+
+RevsTM <- RevsTM[rowWordsb > 0,] 
+
+RevsTM
+
+Revs_tfidf <- weightTfIdf(RevsTM)
+
+head(Revs_tfidf)
+```
+
+
+Für den ersten simplen Recommender werden wir LDA Modell verwenden.
+Wir versuchen eine passendere Anzahl an Topics zu finden
+
+```{r}
+library(ldatuning)
+
+result <- FindTopicsNumber(
+  RevsTM,
+  topics = seq(from = 3, to = 8, by = 1),
+  metrics = c("CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 421),
+  mc.cores = 2L,
+  verbose = TRUE)
+
+FindTopicsNumber_plot(result)
+```
+
+
+
+
+```{r}
+tags_r <- colnames(reviews_filtered)
+tags_r <- tags_r[! tags_r %in% c('doc_id', 'text')]
+```
+
+
+
+
+```{r echo = FALSE, eval = FALSE}
+for(i in 1:length(rev_corpus)){
+  for (tag in tags_r){
+    meta(rev_corpus[[i]], tag=tag) <- transfer_metadata(rev_corpus, i=i, tag=tag)
+  }
+}
+```
+
+```{r}
+rev_tidy <- tidy(rev_corpus)
+rev_meta <- reviews_filtered[,!c(1,5)]
+```
+
+```{r}
+sparse_matrix <- as(rev_tfidf, "sparseMatrix")
+rev_tfidf_matrix <- new("realRatingMatrix", data = sparse_matrix)
+
+```
+```
+
+
+```{r}
+U_LDA <- LDA(RevsTM, 4, method = "Gibbs")
+
+#customer-topic matrix
+u_topics <- as.data.frame(topics(U_LDA))
+
+
+topicshares <- U_LDA@gamma #theta
+head(topicshares)
+```
+
+Jetzt nehmen wir die Topic Shares per Beer und die Topic Shares per user und machen SVD
+
+ 
+# Die nächsten Schritte 
+```{r}
+
+```
+
+Als nächgstes werden wir verschiedene NLP verfahren testen und dann mit Hilfe des recommenderlab Paketes geeignete Klassifikationsverfahren finden.
+Idealerweise schaffe ich es aktuelle daten von einer Rating Platform zu finden. 
+Außerdem Möchte ich die Nutzersegmente anhand ihrer Reviews Clustern und zu verstehen, ob es hier zugrunde liegende Muster gibt. 
+
+Die Gewichtung der Textdaten und die die Feature Selektion wird noch eine größere Baustelle sein. 
+
+
+
+
+
+
+Now we we use TF-IDF for making recommendations. 
